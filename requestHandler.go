@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,19 @@ type Client struct {
 	Path       string        // API请求的路径。默认为 "chat/completions"
 	Body       []byte
 	HTTPClient HTTPDoer // HTTP客户端发送请求后获得的响应
+}
+
+// Usage 调用结束时返回的 Token 使用统计.
+type Usage struct {
+	PromptTokens        int                 `json:"prompt_tokens"`         // 用户输入的 Token 数量.
+	CompletionTokens    int                 `json:"completion_tokens"`     // 输出的 Token 数量.
+	TotalTokens         int                 `json:"total_tokens"`          // Token 总数，对于 glm-4-voice 模型，1秒音频=12.5 Tokens，向上取整.
+	PromptTokensDetails PromptTokensDetails `json:"prompt_tokens_details"` // token消耗明细.
+}
+
+// PromptTokensDetails token消耗明细
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"` //命中的缓存 Token 数量
 }
 
 // Option 配置客户端实例
@@ -186,4 +200,20 @@ func (c *Client) handleRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// HandleAPIError 通过解析响应主体来处理API错误.
+func HandleAPIError(body []byte) error {
+	responseBody := string(body)
+
+	if len(responseBody) == 0 {
+		return fmt.Errorf("解析响应JSON失败：响应正文为空")
+	}
+	if strings.HasPrefix(responseBody, "<!DOCTYPE html>") {
+		return fmt.Errorf("意外的HTML响应（模型可能不存在）。这可能是一些外部服务器如何返回错误的html响应的问题。确保您调用的路径或模型正确")
+	}
+	if strings.Contains(responseBody, "{\"error\"") {
+		return fmt.Errorf("无法解析响应JSON: %s", responseBody)
+	}
+	return fmt.Errorf("无法解析响应JSON：JSON输入意外结束. %s", responseBody)
 }
