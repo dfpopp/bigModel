@@ -1,4 +1,4 @@
-package bigModel
+package chat
 
 const (
 	// ChatMessageRoleSystem is the role of a system message

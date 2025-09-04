@@ -1,25 +1,13 @@
-package bigModelChat
+package chat
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/dfpopp/bigModel"
-	"github.com/dfpopp/bigModel/model/bigModelVideo"
-	"github.com/dfpopp/bigModel/model/tool/moderations"
-	"github.com/dfpopp/bigModel/model/tool/webSearch"
-)
-
-const (
-	// ChatMessageRoleSystem 是系统消息的角色
-	ChatMessageRoleSystem = bigModel.ChatMessageRoleSystem
-	// ChatMessageRoleUser is the role of a user message
-	ChatMessageRoleUser = bigModel.ChatMessageRoleUser
-	// ChatMessageRoleAssistant 是助理消息的角色
-	ChatMessageRoleAssistant = bigModel.ChatMessageRoleAssistant
-	// ChatMessageRoleTool 是工具信息的作用
-	ChatMessageRoleTool = bigModel.ChatMessageRoleTool
+	"github.com/dfpopp/bigModel/model/video"
+	"github.com/dfpopp/bigModel/tool/moderations"
+	"github.com/dfpopp/bigModel/tool/webSearch"
 )
 
 var (
@@ -122,7 +110,7 @@ type ChatCompletionRequest struct {
 
 //输出参数结构体
 
-// Audio 调用结束时返回的 Token 使用统计
+// Audio 当使用 glm-4-voice 模型时返回的音频内容
 type Audio struct {
 	Id        string `json:"id"`                   // 当前对话的音频内容id，可用于多轮对话输入.
 	Data      string `json:"data,omitempty"`       // 当前对话的音频内容base64编码.
@@ -188,20 +176,42 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"` // 推理终止原因。可以是 'stop'、'tool_calls'、'length'、'sensitive' 或 'network_error'。
 }
 
-// ChatCompletionResponse 对话补全业务处理成功.
-type ChatCompletionResponse struct {
-	ID            string                      `json:"id"`             // 任务 ID.
-	RequestId     string                      `json:"request_id"`     // 请求 ID.
-	Created       int64                       `json:"created"`        // 请求创建时间，Unix 时间戳（秒）.
-	Model         string                      `json:"model"`          // 模型名称.
-	Choices       []Choice                    `json:"choices"`        // 模型响应列表.
-	Usage         bigModel.Usage              `json:"usage"`          // 调用结束时返回的 Token 使用统计.
-	VideoResult   []bigModelVideo.VideoResult `json:"video_result"`   // 调用结束时返回的 Token 使用统计.
-	WebSearch     []webSearch.WebSearch       `json:"web_search"`     // 调用结束时返回的 Token 使用统计.
-	ContentFilter []moderations.ContentFilter `json:"content_filter"` // 调用结束时返回的 Token 使用统计.
+// Usage 调用结束时返回的 Token 使用统计.
+type Usage struct {
+	PromptTokens        int                 `json:"prompt_tokens"`         // 用户输入的 Token 数量.
+	CompletionTokens    int                 `json:"completion_tokens"`     // 输出的 Token 数量.
+	TotalTokens         int                 `json:"total_tokens"`          // Token 总数，对于 glm-4-voice 模型，1秒音频=12.5 Tokens，向上取整.
+	PromptTokensDetails PromptTokensDetails `json:"prompt_tokens_details"` // token消耗明细.
 }
 
-// PostRequest 发送非stream的聊天请求
+// PromptTokensDetails token消耗明细
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"` //命中的缓存 Token 数量
+}
+
+// ChatCompletionResponse 对话补全业务处理成功.
+type ChatCompletionResponse struct {
+	ID            string                      `json:"id,omitempty"`             // 任务 ID.
+	RequestId     string                      `json:"request_id,omitempty"`     // 请求 ID.
+	Created       int64                       `json:"created,omitempty"`        // 请求创建时间，Unix 时间戳（秒）.
+	Model         string                      `json:"model"`                    // 模型名称.
+	Choices       []Choice                    `json:"choices,omitempty"`        // 模型响应列表.
+	Usage         Usage                       `json:"usage,omitempty"`          // 调用结束时返回的 Token 使用统计.
+	VideoResult   []video.VideoResult         `json:"video_result,omitempty"`   // 调用结束时返回的 Token 使用统计.
+	WebSearch     []webSearch.WebSearch       `json:"web_search,omitempty"`     // 调用结束时返回的 Token 使用统计.
+	ContentFilter []moderations.ContentFilter `json:"content_filter,omitempty"` // 调用结束时返回的 Token 使用统计.
+	TaskStatus    string                      `json:"task_status,omitempty"`    // 调用结束时返回的 Token 使用统计.
+}
+
+// ChatCompletionAsyncResponse 对话补全业务处理成功.
+type ChatCompletionAsyncResponse struct {
+	ID         string `json:"id"`          // 任务 ID.
+	RequestId  string `json:"request_id"`  // 请求 ID.
+	Model      string `json:"model"`       // 模型名称.
+	TaskStatus string `json:"task_status"` // 处理状态，PROCESSING (处理中)、SUCCESS (成功)、FAIL (失败)。结果需要通过查询获取.
+}
+
+// PostChatRequest 发送非stream的聊天请求
 func PostRequest(c *bigModel.Client, ctx context.Context, request *ChatCompletionRequest) (*ChatCompletionResponse, error) {
 	if request == nil {
 		return nil, fmt.Errorf("请求不能为空")
@@ -229,33 +239,30 @@ func PostRequest(c *bigModel.Client, ctx context.Context, request *ChatCompletio
 	return respData, nil
 }
 
-// PostStreamRequest 发送stream=true的聊天请求，并返回增量
-func PostStreamRequest(c *bigModel.Client, ctx context.Context, request *ChatCompletionRequest) (ChatCompletionStream, error) {
+// AsyncRequest 发送非stream的聊天请求
+func AsyncRequest(c *bigModel.Client, ctx context.Context, request *ChatCompletionRequest) (*ChatCompletionAsyncResponse, error) {
 	if request == nil {
 		return nil, fmt.Errorf("请求不能为空")
 	}
-	ctx, _, err := bigModel.GetTimeoutContext(ctx, c.Timeout)
+	ctx, tcancel, err := bigModel.GetTimeoutContext(ctx, c.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("error getting timeout context: %w", err)
 	}
-	request.Stream = true
+	defer tcancel()
 	err = bigModel.SetBodyFromStruct(request)(c)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.PostStreamRequest(ctx)
+	resp, err := c.PostRequest(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		return nil, bigModel.HandleError(resp)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	stream := &chatCompletionStream{
-		ctx:    ctx,
-		cancel: cancel,
-		resp:   resp,
-		reader: bufio.NewReader(resp.Body),
+	respData, err := HandleChatCompletionAsyncResponse(resp)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding response: %w", err)
 	}
-	return stream, nil
+	return respData, nil
 }

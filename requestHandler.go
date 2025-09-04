@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -21,25 +25,13 @@ type HTTPDoer interface {
 
 // Client 与API接口请求的主要结构体.
 type Client struct {
-	AuthToken  string        // API请求的验证令牌APIKEY
-	BaseURL    string        // 智谱API接口基础请求地址
-	Timeout    time.Duration // 客户端请求超时时间
-	Path       string        // API请求的路径。默认为 "chat/completions"
-	Body       []byte
-	HTTPClient HTTPDoer // HTTP客户端发送请求后获得的响应
-}
-
-// Usage 调用结束时返回的 Token 使用统计.
-type Usage struct {
-	PromptTokens        int                 `json:"prompt_tokens"`         // 用户输入的 Token 数量.
-	CompletionTokens    int                 `json:"completion_tokens"`     // 输出的 Token 数量.
-	TotalTokens         int                 `json:"total_tokens"`          // Token 总数，对于 glm-4-voice 模型，1秒音频=12.5 Tokens，向上取整.
-	PromptTokensDetails PromptTokensDetails `json:"prompt_tokens_details"` // token消耗明细.
-}
-
-// PromptTokensDetails token消耗明细
-type PromptTokensDetails struct {
-	CachedTokens int `json:"cached_tokens"` //命中的缓存 Token 数量
+	AuthToken   string        // API请求的验证令牌APIKEY
+	BaseURL     string        // 智谱API接口基础请求地址
+	Timeout     time.Duration // 客户端请求超时时间
+	Path        string        // API请求的路径。默认为 "chat/completions"
+	Body        []byte
+	ContentType string   //form表单提交的需要该参数
+	HTTPClient  HTTPDoer // HTTP客户端发送请求后获得的响应
 }
 
 // Option 配置客户端实例
@@ -47,7 +39,7 @@ type Option func(*Client) error
 
 // NewClientWithOptions 使用所需的身份验证令牌(token)和可选配置创建新客户端.
 // Defaults:
-// - BaseURL: "https://open.bigmodel.cn/api/paas/v4/"
+// - BaseURL: "https://open.bigmodel.cn/api/"
 // - Timeout: 5 minutes
 func NewClientWithOptions(authToken string, opts ...Option) (*Client, error) {
 	// Check for empty auth token and try to use environment variable
@@ -127,6 +119,43 @@ func SetBodyFromStruct(data interface{}) Option {
 		return nil
 	}
 }
+func SetBodyToForm(data map[string]string, fileFieldName string) Option {
+	return func(c *Client) error {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for field, value := range data {
+			if field != fileFieldName {
+				err := writer.WriteField(field, value)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		// 创建表单字段
+		part, err := writer.CreateFormFile(fileFieldName, path.Base(data[fileFieldName]))
+		if err != nil {
+			return err
+		}
+		// 将文件内容复制到表单字段中
+		file, err := os.Open(data[fileFieldName])
+		if err != nil {
+			return err
+		}
+		defer file.Close() // 修复：漏了关闭文件，可能导致资源泄漏
+		_, err = io.Copy(part, file)
+		if err != nil {
+			return err
+		}
+		// 关闭writer，确保所有缓冲区的数据都被刷新到底层的io.Writer中
+		err = writer.Close()
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+		c.Body = body.Bytes()
+		c.ContentType = writer.FormDataContentType()
+		return nil
+	}
+}
 
 // GetTimeoutContext 创建具有超时的上下文.
 // 如果超时时间大于0，它将创建一个具有该超时时间的上下文.
@@ -172,6 +201,38 @@ func (c *Client) PostStreamRequest(ctx context.Context) (*http.Response, error) 
 	return c.handleRequest(req)
 }
 
+// PostRequest 构造一个post方式的HTTP请求.
+func (c *Client) FormRequest(ctx context.Context) (*http.Response, error) {
+	if c.BaseURL == "" || c.Path == "" {
+		return nil, fmt.Errorf("请求的API接口地址或路径未设置")
+	}
+	url := fmt.Sprintf("%s%s", c.BaseURL, c.Path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(c.Body))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求体错误: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	req.Header.Set("Content-Type", c.ContentType)
+	return c.handleRequest(req)
+}
+
+//PostStreamRequest 构造流式响应的post方式HTTP请求.
+
+func (c *Client) FormStreamRequest(ctx context.Context) (*http.Response, error) {
+	if c.BaseURL == "" || c.Path == "" {
+		return nil, fmt.Errorf("请求的API接口地址或路径未设置")
+	}
+	url := fmt.Sprintf("%s%s", c.BaseURL, c.Path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(c.Body))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求体错误: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	req.Header.Set("cache-control", "no-cache")
+	req.Header.Set("Content-Type", c.ContentType)
+	return c.handleRequest(req)
+}
+
 // GetRequest 构造一个get方式的HTTP请求.
 func (c *Client) GetRequest(ctx context.Context) (*http.Response, error) {
 	if c.BaseURL == "" || c.Path == "" {
@@ -183,6 +244,7 @@ func (c *Client) GetRequest(ctx context.Context) (*http.Response, error) {
 		return nil, fmt.Errorf("创建请求体错误: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	req.Header.Set("cache-control", "no-cache")
 	req.Header.Set("Content-Type", "application/json")
 	return c.handleRequest(req)
 }
@@ -205,7 +267,6 @@ func (c *Client) handleRequest(req *http.Request) (*http.Response, error) {
 // HandleAPIError 通过解析响应主体来处理API错误.
 func HandleAPIError(body []byte) error {
 	responseBody := string(body)
-
 	if len(responseBody) == 0 {
 		return fmt.Errorf("解析响应JSON失败：响应正文为空")
 	}
